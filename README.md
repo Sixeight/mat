@@ -1,4 +1,5 @@
 # mat
+<img width="600" height="600" alt="mat logo" src="https://github.com/user-attachments/assets/bc726b0c-be80-4057-aeb7-e3990cc4294e" />
 
 `mat` (Markdown cat) renders Markdown in your terminal.
 
