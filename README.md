@@ -1,7 +1,7 @@
 # mat
 <img width="600" height="600" alt="mat logo" src="https://github.com/user-attachments/assets/bc726b0c-be80-4057-aeb7-e3990cc4294e" />
 
-<img width="600" alt="demo" src="https://github.com/user-attachments/assets/e72aa28d-afb1-492c-9d2b-43b8fb5250f1" />
+<img width="600" alt="demo" src="https://github.com/user-attachments/assets/f7f4bd3e-f844-4191-8ef5-8ae3725f6cc6" />
 
 `mat` (Markdown cat) renders Markdown in your terminal.
 
