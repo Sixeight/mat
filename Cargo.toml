@@ -1,0 +1,46 @@
+[package]
+name = "mat"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Render Markdown and images in the terminal"
+
+[features]
+default = ["cli"]
+test-support = []
+cli = ["dep:clap", "dep:reqwest"]
+
+[[bin]]
+name = "mat"
+path = "src/bin/mat.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+syntect = "5"
+two-face = "0.5.1"
+pulldown-cmark = "0.12"
+unicode-width = "0.2"
+emojis = "0.6"
+ma = { git = "https://github.com/Sixeight/ma" }
+ratatui-image = "4"
+image = "0.25"
+resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+base64 = "0.22"
+anyhow = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+reqwest = { version = "0.12", features = ["blocking"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.26.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
