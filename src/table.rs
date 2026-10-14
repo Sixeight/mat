@@ -87,17 +87,26 @@ impl Table {
             result.lines.push(border(&previous, &boundaries));
             let y = result.lines.len();
             for line_index in 0..height {
-                let mut spans = vec![Span::raw("│")];
+                let mut spans = vec![Span::styled(
+                    "│",
+                    Style::default().fg(crate::TABLE_BORDER_FG),
+                )];
                 let mut used = 1;
                 for (_, cell_width, lines, _) in &cells {
                     let line = lines.get(line_index).cloned().unwrap_or_default();
                     let padding = cell_width.saturating_sub(line.width());
                     spans.extend(line.spans);
-                    spans.push(Span::raw(format!("{}│", " ".repeat(padding))));
+                    spans.push(Span::styled(
+                        format!("{}│", " ".repeat(padding)),
+                        Style::default().fg(crate::TABLE_BORDER_FG),
+                    ));
                     used += cell_width + 1;
                 }
                 if used < width {
-                    spans.push(Span::raw(format!("{}│", " ".repeat(width - used - 1))));
+                    spans.push(Span::styled(
+                        format!("{}│", " ".repeat(width - used - 1)),
+                        Style::default().fg(crate::TABLE_BORDER_FG),
+                    ));
                 }
                 result.lines.push(Line::from(spans));
             }
@@ -133,7 +142,10 @@ fn border(above: &[bool], below: &[bool]) -> Line<'static> {
             _ => '─',
         })
         .collect();
-    Line::from(text)
+    Line::from(Span::styled(
+        text,
+        Style::default().fg(crate::TABLE_BORDER_FG),
+    ))
 }
 
 fn cell_layout(
