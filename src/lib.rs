@@ -17,6 +17,8 @@ pub mod image;
 mod kitty;
 mod layout;
 mod render;
+mod table;
+pub use table::{ImagePlacement, Table, TableCell, TableLayout};
 pub mod syntax;
 pub mod terminal;
 pub mod terminal_image;

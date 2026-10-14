@@ -20,7 +20,7 @@ pub const VIDEO_HEIGHT: u16 = 4;
 const BLOB_URL_PREFIX: &str = "https://github.com/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaKind {
+pub(crate) enum MediaKind {
     Image,
     Video,
 }
@@ -113,7 +113,7 @@ fn media_kind_for_url(url: &str) -> Option<MediaKind> {
     None
 }
 
-fn html_attr_value<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+pub(crate) fn html_attr_value<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
     let lower = tag.to_ascii_lowercase();
     let attr_lower = attr.to_ascii_lowercase();
     let key = format!("{attr_lower}=");
@@ -134,7 +134,7 @@ fn html_attr_value<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
 }
 
 /// Extract a single media block from a raw HTML tag (`<img>` / `<video>` / `<source>`).
-fn media_from_html_tag(html: &str) -> Option<(MediaKind, String, String)> {
+pub(crate) fn media_from_html_tag(html: &str) -> Option<(MediaKind, String, String)> {
     let trimmed = html.trim();
     if trimmed.is_empty() {
         return None;
@@ -155,46 +155,6 @@ fn media_from_html_tag(html: &str) -> Option<(MediaKind, String, String)> {
         .unwrap_or_default()
         .to_string();
     Some((kind, url, alt))
-}
-
-fn media_from_html(html: &str, in_comment: &mut bool) -> Vec<(MediaKind, String, String)> {
-    let mut media = Vec::new();
-    let mut remaining = html;
-    while !remaining.is_empty() {
-        if *in_comment {
-            let Some(end) = remaining.find("-->") else {
-                break;
-            };
-            remaining = &remaining[end + 3..];
-            *in_comment = false;
-            continue;
-        }
-        let Some(start) = remaining.find('<') else {
-            break;
-        };
-        remaining = &remaining[start..];
-        if remaining.starts_with("<!--") {
-            *in_comment = true;
-            remaining = &remaining[4..];
-            continue;
-        }
-        let mut quote = None;
-        let end = remaining.char_indices().find_map(|(index, c)| {
-            match (quote, c) {
-                (Some(q), c) if q == c => quote = None,
-                (None, '\'' | '"') => quote = Some(c),
-                (None, '>') => return Some(index + 1),
-                _ => {}
-            }
-            None
-        });
-        let Some(end) = end else { break };
-        if let Some(item) = media_from_html_tag(&remaining[..end]) {
-            media.push(item);
-        }
-        remaining = &remaining[end..];
-    }
-    media
 }
 
 fn split_raw_media_segments(text: &str) -> Vec<(&str, Option<(&str, MediaKind)>)> {
@@ -547,6 +507,7 @@ fn mermaid_unavailable_line(error: &str, style: Style) -> Line<'static> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContentBlock {
     Text(Line<'static>),
+    Table(crate::Table),
     Image {
         url: String,
         alt: String,
@@ -1064,6 +1025,7 @@ fn markdown_to_lines_inner(
     let mut table_header_cells: Vec<Vec<Span<'static>>> = Vec::new();
     let mut table_data_rows: Vec<Vec<Vec<Span<'static>>>> = Vec::new();
     let mut table_current_row: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut html_buffer = String::new();
 
     let base = {
         let mut s = Style::default().fg(base_fg);
@@ -1370,6 +1332,32 @@ fn markdown_to_lines_inner(
             Event::End(TagEnd::FootnoteDefinition) => {
                 flush_line(&mut current_spans, &mut lines);
             }
+            Event::Start(Tag::HtmlBlock) => {}
+            Event::Html(html) => html_buffer.push_str(&html),
+            Event::End(TagEnd::HtmlBlock) => {
+                let mut pending = false;
+                let html_blocks = crate::table::html_blocks(&html_buffer, base, &mut pending);
+                if pending {
+                    continue;
+                }
+                for block in html_blocks {
+                    if let ContentBlock::Table(table) = block {
+                        lines.extend(
+                            table
+                                .layout(
+                                    if options.width == 0 {
+                                        MARKDOWN_WRAP_WIDTH
+                                    } else {
+                                        options.width
+                                    },
+                                    |_, _| None,
+                                )
+                                .lines,
+                        );
+                    }
+                }
+                html_buffer.clear();
+            }
             Event::Rule => {
                 flush_line(&mut current_spans, &mut lines);
                 lines.push(hr_line(bg));
@@ -1448,7 +1436,7 @@ fn markdown_to_content_blocks(
     let mut in_suggestion = false;
     let mut suggestion_lines: Vec<String> = Vec::new();
     let mut in_image = false;
-    let mut in_html_comment = false;
+
     let mut image_url = String::new();
     let mut image_alt = String::new();
     let mut in_link = false;
@@ -1462,6 +1450,7 @@ fn markdown_to_content_blocks(
     let mut table_header_cells: Vec<Vec<Span<'static>>> = Vec::new();
     let mut table_data_rows: Vec<Vec<Vec<Span<'static>>>> = Vec::new();
     let mut table_current_row: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut html_buffer = String::new();
 
     let base = {
         let mut s = Style::default().fg(base_fg);
@@ -1483,7 +1472,8 @@ fn markdown_to_content_blocks(
             ContentBlock::Image { .. }
             | ContentBlock::Video { .. }
             | ContentBlock::CodeSnippet { .. }
-            | ContentBlock::Suggestion { .. } => true,
+            | ContentBlock::Suggestion { .. }
+            | ContentBlock::Table(_) => true,
         });
         if !blocks.is_empty() && last_non_empty {
             blocks.push(ContentBlock::Text(Line::from(Span::styled(
@@ -1891,16 +1881,25 @@ fn markdown_to_content_blocks(
                 flush_line(&mut current_spans, &mut blocks);
                 blocks.push(ContentBlock::Text(hr_line(bg)));
             }
-            Event::Html(html) | Event::InlineHtml(html) => {
-                for (kind, url, alt) in media_from_html(html.as_ref(), &mut in_html_comment) {
-                    if !current_spans.is_empty() {
-                        flush_line(&mut current_spans, &mut blocks);
-                    }
-                    match kind {
-                        MediaKind::Image => blocks.push(ContentBlock::Image { url, alt }),
-                        MediaKind::Video => blocks.push(ContentBlock::Video { url, alt }),
-                    }
+            Event::Start(Tag::HtmlBlock) => {}
+            Event::Html(html) => html_buffer.push_str(&html),
+            Event::End(TagEnd::HtmlBlock) => {
+                if !current_spans.is_empty() {
+                    flush_line(&mut current_spans, &mut blocks);
                 }
+                let mut pending = false;
+                let html_blocks = crate::table::html_blocks(&html_buffer, base, &mut pending);
+                if !pending {
+                    blocks.extend(html_blocks);
+                    html_buffer.clear();
+                }
+            }
+            Event::InlineHtml(html) => {
+                let html_blocks = crate::table::html_blocks(&html, base, &mut false);
+                if !html_blocks.is_empty() && !current_spans.is_empty() {
+                    flush_line(&mut current_spans, &mut blocks);
+                }
+                blocks.extend(html_blocks);
             }
             _ => {}
         }
@@ -3003,6 +3002,7 @@ mod tests {
                     }
                 }
                 ContentBlock::Suggestion { lines } => format!("[suggestion:{}]", lines.join("|")),
+                ContentBlock::Table(table) => format!("{table:?}"),
             })
             .collect()
     }
@@ -3129,6 +3129,62 @@ mod tests {
     }
 
     #[test]
+    fn html_tables_keep_blank_lines_and_inline_word_spacing() {
+        let md = "<table>\n<tr><th>Before</th><th>After</th></tr>\n\n<tr><td>hello <b>bold</b> world</td><td>right</td></tr>\n</table>";
+        let lines = Renderer::default().layout_lines(
+            md,
+            &RenderOptions {
+                width: 60,
+                ..Default::default()
+            },
+        );
+        let texts = line_texts(&lines).join("\n");
+        assert!(texts.contains("Before"), "{texts}");
+        assert!(texts.contains("hello bold world"), "{texts}");
+    }
+
+    #[test]
+    fn inline_html_image_keeps_surrounding_text_order() {
+        let blocks =
+            markdown_to_content_blocks("before <img src=\"x\"> after", Color::White, None, None);
+        assert!(
+            matches!(&blocks[0], ContentBlock::Text(line) if line.to_string().contains("before"))
+        );
+        assert!(matches!(&blocks[1], ContentBlock::Image { url, .. } if url == "x"));
+        assert!(
+            matches!(&blocks[2], ContentBlock::Text(line) if line.to_string().contains("after"))
+        );
+    }
+
+    #[test]
+    fn html_table_preserves_headers_and_spanning_cell() {
+        let md = r#"<table>
+<tr><th>Before</th><th>After</th></tr>
+<tr><td colspan="2"><b>ストリートビュー</b></td></tr>
+<tr><td><img src="before.png"></td><td><img src="after.png"></td></tr>
+</table>"#;
+        let lines = Renderer::default().layout_lines(
+            md,
+            &RenderOptions {
+                width: 40,
+                ..Default::default()
+            },
+        );
+        let texts = line_texts(&lines);
+        assert!(
+            texts
+                .iter()
+                .any(|line| line.contains("Before") && line.contains("After")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|line| line.contains("ストリートビュー")),
+            "{texts:?}"
+        );
+        assert!(lines.iter().all(|line| line.width() <= 40));
+    }
+
+    #[test]
     fn html_table_emits_all_images_in_source_order() {
         let md = r#"<table>
 <tr><th>Before</th><th>After</th></tr>
@@ -3137,6 +3193,15 @@ mod tests {
         let blocks = markdown_to_content_blocks(md, Color::White, None, None);
         let images: Vec<_> = blocks
             .iter()
+            .flat_map(|block| match block {
+                ContentBlock::Table(table) => table
+                    .rows
+                    .iter()
+                    .flatten()
+                    .flat_map(|cell| cell.content.iter())
+                    .collect::<Vec<_>>(),
+                _ => vec![block],
+            })
             .filter_map(|block| match block {
                 ContentBlock::Image { url, alt } => Some((url.as_str(), alt.as_str())),
                 _ => None,
@@ -3162,6 +3227,15 @@ mod tests {
         let blocks = markdown_to_content_blocks(md, Color::White, None, None);
         let images: Vec<_> = blocks
             .iter()
+            .flat_map(|block| match block {
+                ContentBlock::Table(table) => table
+                    .rows
+                    .iter()
+                    .flatten()
+                    .flat_map(|cell| cell.content.iter())
+                    .collect::<Vec<_>>(),
+                _ => vec![block],
+            })
             .filter_map(|block| match block {
                 ContentBlock::Image { url, alt } => Some((url.as_str(), alt.as_str())),
                 _ => None,

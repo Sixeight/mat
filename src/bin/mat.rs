@@ -120,6 +120,43 @@ fn run(args: Args) -> Result<()> {
     for block in blocks {
         match block {
             ContentBlock::Text(line) => write_line(&mut output, &line, color)?,
+            ContentBlock::Table(table) => {
+                let mut encoded_images = Vec::new();
+                let layout = table.layout(usize::from(width), |url, cell_width| {
+                    let mut options = image_options?;
+                    options.max_cells.0 = cell_width.min(u16::MAX as usize) as u16;
+                    let encoded = loader.load(url).and_then(|image| {
+                        let mut bytes = Vec::new();
+                        let (_, height) = write_image(&mut bytes, &image, options)?;
+                        Ok((bytes, height))
+                    });
+                    match encoded {
+                        Ok((bytes, height)) => {
+                            encoded_images.push(bytes);
+                            Some(usize::from(height))
+                        }
+                        Err(error) => {
+                            if args.verbose {
+                                image_diagnostics.push(format!(
+                                    "mat: image {}: {}",
+                                    sanitize_text(url),
+                                    sanitize_text(&format!("{error:#}"))
+                                ));
+                            }
+                            None
+                        }
+                    }
+                });
+                for (row, line) in layout.lines.iter().enumerate() {
+                    write_line(&mut output, line, color)?;
+                    for (placement, encoded) in layout.images.iter().zip(&encoded_images) {
+                        if row == placement.row + placement.height - 1 {
+                            write!(output, "\x1b[{}A", placement.height)?;
+                            write_positioned_image(&mut output, encoded, placement.column)?;
+                        }
+                    }
+                }
+            }
             ContentBlock::Image { url, alt } => {
                 if let Some(image_options) = image_options {
                     if args.image_loading == ImageLoading::Sync {
@@ -330,6 +367,23 @@ fn write_fallback(
     Ok(())
 }
 
+fn write_positioned_image(
+    output: &mut impl Write,
+    encoded: &[u8],
+    column: usize,
+) -> io::Result<()> {
+    for (index, part) in encoded.split(|byte| *byte == b'\r').enumerate() {
+        if index > 0 {
+            output.write_all(b"\r")?;
+            if column > 0 {
+                write!(output, "\x1b[{column}C")?;
+            }
+        }
+        output.write_all(part)?;
+    }
+    output.write_all(b"\r")
+}
+
 fn is_broken_pipe(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -341,6 +395,19 @@ fn is_broken_pipe(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_image_offsets_each_raster_row_and_restores_column() {
+        let mut output = Vec::new();
+        write_positioned_image(&mut output, b"\rfirst\r\n\rsecond\r\n", 7).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "\r\x1b[7Cfirst\r\x1b[7C\n\r\x1b[7Csecond\r\x1b[7C\n\r"
+        );
+        let mut output = Vec::new();
+        write_positioned_image(&mut output, b"\rrow\r\n", 0).unwrap();
+        assert_eq!(output, b"\rrow\r\n\r");
+    }
 
     #[test]
     fn color_selection_respects_tty_and_explicit_overrides() {
