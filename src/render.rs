@@ -157,6 +157,46 @@ fn media_from_html_tag(html: &str) -> Option<(MediaKind, String, String)> {
     Some((kind, url, alt))
 }
 
+fn media_from_html(html: &str, in_comment: &mut bool) -> Vec<(MediaKind, String, String)> {
+    let mut media = Vec::new();
+    let mut remaining = html;
+    while !remaining.is_empty() {
+        if *in_comment {
+            let Some(end) = remaining.find("-->") else {
+                break;
+            };
+            remaining = &remaining[end + 3..];
+            *in_comment = false;
+            continue;
+        }
+        let Some(start) = remaining.find('<') else {
+            break;
+        };
+        remaining = &remaining[start..];
+        if remaining.starts_with("<!--") {
+            *in_comment = true;
+            remaining = &remaining[4..];
+            continue;
+        }
+        let mut quote = None;
+        let end = remaining.char_indices().find_map(|(index, c)| {
+            match (quote, c) {
+                (Some(q), c) if q == c => quote = None,
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '>') => return Some(index + 1),
+                _ => {}
+            }
+            None
+        });
+        let Some(end) = end else { break };
+        if let Some(item) = media_from_html_tag(&remaining[..end]) {
+            media.push(item);
+        }
+        remaining = &remaining[end..];
+    }
+    media
+}
+
 fn split_raw_media_segments(text: &str) -> Vec<(&str, Option<(&str, MediaKind)>)> {
     let mut segments = Vec::new();
     let mut cursor = 0;
@@ -1408,6 +1448,7 @@ fn markdown_to_content_blocks(
     let mut in_suggestion = false;
     let mut suggestion_lines: Vec<String> = Vec::new();
     let mut in_image = false;
+    let mut in_html_comment = false;
     let mut image_url = String::new();
     let mut image_alt = String::new();
     let mut in_link = false;
@@ -1851,7 +1892,7 @@ fn markdown_to_content_blocks(
                 blocks.push(ContentBlock::Text(hr_line(bg)));
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                if let Some((kind, url, alt)) = media_from_html_tag(html.as_ref()) {
+                for (kind, url, alt) in media_from_html(html.as_ref(), &mut in_html_comment) {
                     if !current_spans.is_empty() {
                         flush_line(&mut current_spans, &mut blocks);
                     }
@@ -3085,6 +3126,51 @@ mod tests {
             ContentBlock::Image { url, alt }
                 if url == "https://github.com/user-attachments/assets/img-1" && alt == "ui"
         )));
+    }
+
+    #[test]
+    fn html_table_emits_all_images_in_source_order() {
+        let md = r#"<table>
+<tr><th>Before</th><th>After</th></tr>
+<tr><td><img src="https://example.com/before.png" alt="Before: ストリートビュー"></td><td><img src="https://example.com/after.png" alt="After: ストリートビュー"></td></tr>
+</table>"#;
+        let blocks = markdown_to_content_blocks(md, Color::White, None, None);
+        let images: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image { url, alt } => Some((url.as_str(), alt.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            images,
+            vec![
+                ("https://example.com/before.png", "Before: ストリートビュー"),
+                ("https://example.com/after.png", "After: ストリートビュー"),
+            ]
+        );
+    }
+
+    #[test]
+    fn html_table_ignores_images_in_comments_and_attributes() {
+        let md = r#"<table><tr><td title='<img src="https://example.com/attribute.png">'>
+<!--
+<tr><td><img src="https://example.com/comment.png"></td></tr>
+-->
+<IMG src="https://example.com/visible.png" alt="Before > After">
+</td></tr></table>"#;
+        let blocks = markdown_to_content_blocks(md, Color::White, None, None);
+        let images: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image { url, alt } => Some((url.as_str(), alt.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            images,
+            vec![("https://example.com/visible.png", "Before > After")]
+        );
     }
 
     #[test]
