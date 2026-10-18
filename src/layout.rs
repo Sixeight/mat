@@ -19,6 +19,30 @@ pub fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
     for span in line.spans {
         let style = span.style;
         let mut buf = String::new();
+        if span
+            .content
+            .bytes()
+            .all(|byte| (b' '..=b'~').contains(&byte))
+        {
+            let mut remaining = span.content.as_ref();
+            while !remaining.is_empty() {
+                if current_width >= max_width {
+                    if !buf.is_empty() {
+                        current_spans.push(Span::styled(std::mem::take(&mut buf), style));
+                    }
+                    result.push(Line::from(std::mem::take(&mut current_spans)));
+                    current_width = 0;
+                }
+                let count = remaining.len().min(max_width - current_width);
+                buf.push_str(&remaining[..count]);
+                remaining = &remaining[count..];
+                current_width += count;
+            }
+            if !buf.is_empty() {
+                current_spans.push(Span::styled(buf, style));
+            }
+            continue;
+        }
         for ch in span.content.chars() {
             let (rendered, repeat) = if ch == '\t' {
                 (' ', TAB_STOP - current_width % TAB_STOP)
@@ -82,6 +106,30 @@ mod tests {
         let wrapped = wrap_line(line, 10);
         assert_eq!(wrapped.len(), 3);
         assert!(wrapped.iter().all(|l| l.width() <= 10));
+    }
+
+    #[test]
+    fn wrap_line_keeps_ascii_styles_across_boundaries() {
+        let line = Line::from(vec![
+            Span::raw("abcd"),
+            Span::styled("efghij", Style::default().fg(Color::Red)),
+        ]);
+        let wrapped = wrap_line(line, 5);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].spans[0].content, "abcd");
+        assert_eq!(wrapped[0].spans[1].content, "e");
+        assert_eq!(wrapped[1].spans[0].content, "fghij");
+        assert_eq!(wrapped[0].spans[1].style.fg, Some(Color::Red));
+        assert_eq!(wrapped[1].spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn wrap_line_handles_wide_char_before_ascii_when_width_is_one() {
+        let line = Line::from(vec![Span::raw("あ"), Span::raw("a")]);
+        let wrapped = wrap_line(line, 1);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].spans[0].content, "あ");
+        assert_eq!(wrapped[1].spans[0].content, "a");
     }
 
     #[test]
