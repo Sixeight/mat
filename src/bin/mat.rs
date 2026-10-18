@@ -105,11 +105,11 @@ fn run(args: Args) -> Result<()> {
     } else {
         None
     };
-    let theme = mat::syntax::default_theme();
-    let syntax_set = mat::syntax::syntax_set();
+    let theme = color.then(mat::syntax::default_theme);
+    let syntax_set = color.then(mat::syntax::syntax_set);
     let options = RenderOptions {
         width: usize::from(width),
-        syntax_ctx: Some((syntax_set, &theme)),
+        syntax_ctx: syntax_set.zip(theme.as_ref()),
         ..RenderOptions::default()
     };
     let blocks = Renderer::default().layout_blocks(&input, &options);

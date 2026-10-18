@@ -58,6 +58,16 @@ fn forced_color_keeps_styles_but_removes_input_terminal_controls() {
 }
 
 #[test]
+fn code_block_keeps_text_when_color_is_disabled() {
+    let output = mat(&["--color", "never"], "```rust\nfn main() {}\n```");
+    assert!(output.status.success(), "{:?}", output);
+    let text = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(text.contains("rust"));
+    assert!(text.contains("fn main() {}"));
+    assert!(!text.contains('\x1b'));
+}
+
+#[test]
 fn image_is_a_readable_fallback_without_fetching_when_output_is_piped() {
     let output = mat(
         &[],
