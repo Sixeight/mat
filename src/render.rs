@@ -4,7 +4,7 @@ use ratatui::{
 };
 
 use pulldown_cmark::{
-    BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+    BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 use syntect::highlighting::Theme;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
@@ -1405,6 +1405,35 @@ fn markdown_to_lines_inner(
     }
 }
 
+fn highlight_code_lines(
+    lines: &[&str],
+    syntax: &SyntaxReference,
+    syntax_set: &SyntaxSet,
+    theme: &Theme,
+) -> Vec<Vec<Span<'static>>> {
+    let highlight = |line: &&str| {
+        highlight_content_inner(line, syntax, syntax_set, theme, Some(CODE_BLOCK_BG), false)
+    };
+    let workers = std::thread::available_parallelism().map_or(1, |count| count.get().min(4));
+    if lines.len() < 512 || workers == 1 {
+        return lines.iter().map(highlight).collect();
+    }
+    let chunk_size = lines.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles = lines
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(highlight).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| match handle.join() {
+                Ok(spans) => spans,
+                Err(error) => std::panic::resume_unwind(error),
+            })
+            .collect()
+    })
+}
+
 fn markdown_to_content_blocks(
     renderer: &mut Renderer,
     text: &str,
@@ -1431,6 +1460,7 @@ fn markdown_to_content_blocks(
     let mut in_code_block = false;
     let mut in_mermaid = false;
     let mut code_syntax: Option<&SyntaxReference> = None;
+    let mut code_lines: Vec<CowStr<'_>> = Vec::new();
     let mut mermaid_buf = String::new();
     let mut heading_level: Option<HeadingLevel> = None;
     let mut in_suggestion = false;
@@ -1581,6 +1611,7 @@ fn markdown_to_content_blocks(
                     }
                     None
                 });
+                code_lines.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
                 if in_suggestion {
@@ -1591,6 +1622,20 @@ fn markdown_to_content_blocks(
                     in_code_block = false;
                     code_syntax = None;
                     continue;
+                }
+                if let (Some(syntax), Some((ss, theme))) = (code_syntax, syntax_ctx)
+                    && !in_mermaid
+                {
+                    let border_style = Style::default().fg(CODE_BLOCK_BORDER_FG).bg(CODE_BLOCK_BG);
+                    let lines = code_lines
+                        .iter()
+                        .flat_map(|text| text.lines())
+                        .collect::<Vec<_>>();
+                    for spans in highlight_code_lines(&lines, syntax, ss, theme) {
+                        current_spans.push(Span::styled("▎ ", border_style));
+                        current_spans.extend(spans);
+                        flush_line(&mut current_spans, &mut blocks);
+                    }
                 }
                 if in_mermaid {
                     match renderer.mermaid_to_ascii(&mermaid_buf, mermaid_width) {
@@ -1815,24 +1860,15 @@ fn markdown_to_content_blocks(
                     }
                 } else if in_mermaid {
                     mermaid_buf.push_str(t.as_ref());
+                } else if in_code_block && code_syntax.is_some() {
+                    code_lines.push(t);
                 } else if in_code_block {
                     for code_line in t.as_ref().lines() {
                         let border_style =
                             Style::default().fg(CODE_BLOCK_BORDER_FG).bg(CODE_BLOCK_BG);
                         current_spans.push(Span::styled("▎ ", border_style));
-                        if let (Some(syn), Some((ss, theme))) = (code_syntax, syntax_ctx) {
-                            current_spans.extend(highlight_content_inner(
-                                code_line,
-                                syn,
-                                ss,
-                                theme,
-                                Some(CODE_BLOCK_BG),
-                                false,
-                            ));
-                        } else {
-                            let style = Style::default().fg(CODE_BLOCK_FG).bg(CODE_BLOCK_BG);
-                            current_spans.push(Span::styled(code_line.to_string(), style));
-                        }
+                        let style = Style::default().fg(CODE_BLOCK_FG).bg(CODE_BLOCK_BG);
+                        current_spans.push(Span::styled(code_line.to_string(), style));
                         flush_line(&mut current_spans, &mut blocks);
                     }
                 } else if media_link_kind.is_some() {
@@ -3472,6 +3508,33 @@ mod tests {
             texts.iter().any(|t| t.contains("fn main()")),
             "code body should still render: {texts:?}"
         );
+    }
+
+    #[test]
+    fn large_code_block_keeps_line_order_and_styles() {
+        let theme = crate::syntax::default_theme();
+        let syntax = crate::syntax::syntax_set();
+        let options = RenderOptions {
+            syntax_ctx: Some((syntax, &theme)),
+            ..RenderOptions::default()
+        };
+        let markdown = format!(
+            "```rust\n{}```",
+            (0..600)
+                .map(|index| format!("let item_{index} = {index};\n"))
+                .collect::<String>()
+        );
+        let mut renderer = Renderer::default();
+        let expected = renderer.render_lines(&markdown, &options);
+        let actual = renderer
+            .render_blocks(&markdown, &options)
+            .into_iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(line) => Some(line),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
