@@ -1393,7 +1393,7 @@ dependencies = [
 [[package]]
 name = "ma"
 version = "0.1.0"
-source = "git+https://github.com/Sixeight/ma#7f022be74727f7701f9440373fd62454a96741df"
+source = "git+https://github.com/Sixeight/ma#66e1c3595f52c9850e61ab479eb3d04c329a82e3"
 dependencies = [
  "clap",
  "unicode-width 0.2.0",
