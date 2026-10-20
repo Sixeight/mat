@@ -1480,6 +1480,11 @@ fn markdown_to_content_blocks(
     let mut table_header_cells: Vec<Vec<Span<'static>>> = Vec::new();
     let mut table_data_rows: Vec<Vec<Vec<Span<'static>>>> = Vec::new();
     let mut table_current_row: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut table_rows: Vec<Vec<crate::TableCell>> = Vec::new();
+    let mut table_row_cells: Vec<crate::TableCell> = Vec::new();
+    let mut table_cell_content: Vec<ContentBlock> = Vec::new();
+    let mut table_has_images = false;
+    let mut in_table_cell = false;
     let mut html_buffer = String::new();
 
     let base = {
@@ -1518,7 +1523,13 @@ fn markdown_to_content_blocks(
         match event {
             Event::Start(Tag::Image { dest_url, .. }) => {
                 if !current_spans.is_empty() {
-                    flush_line(&mut current_spans, &mut blocks);
+                    if in_table_cell {
+                        table_cell_content.push(ContentBlock::Text(Line::from(std::mem::take(
+                            &mut current_spans,
+                        ))));
+                    } else {
+                        flush_line(&mut current_spans, &mut blocks);
+                    }
                 }
                 in_image = true;
                 image_url = dest_url.to_string();
@@ -1526,10 +1537,16 @@ fn markdown_to_content_blocks(
             }
             Event::End(TagEnd::Image) => {
                 in_image = false;
-                blocks.push(ContentBlock::Image {
+                let image = ContentBlock::Image {
                     url: std::mem::take(&mut image_url),
                     alt: std::mem::take(&mut image_alt),
-                });
+                };
+                if in_table_cell {
+                    table_has_images = true;
+                    table_cell_content.push(image);
+                } else {
+                    blocks.push(image);
+                }
             }
             _ if in_image => {
                 if let Event::Text(t) = &event {
@@ -1543,35 +1560,58 @@ fn markdown_to_content_blocks(
                 table_header_cells.clear();
                 table_data_rows.clear();
                 table_current_row.clear();
+                table_rows.clear();
+                table_row_cells.clear();
+                table_cell_content.clear();
+                table_has_images = false;
             }
             Event::End(TagEnd::Table) => {
-                for line in render_table_to_lines(
-                    &table_header_cells,
-                    &table_data_rows,
-                    base,
-                    bg,
-                    options.width,
-                ) {
-                    blocks.push(ContentBlock::Text(line));
+                if table_has_images {
+                    blocks.push(ContentBlock::Table(crate::Table {
+                        rows: std::mem::take(&mut table_rows),
+                    }));
+                } else {
+                    for line in render_table_to_lines(
+                        &table_header_cells,
+                        &table_data_rows,
+                        base,
+                        bg,
+                        options.width,
+                    ) {
+                        blocks.push(ContentBlock::Text(line));
+                    }
                 }
             }
             Event::Start(Tag::TableHead) => {
                 table_current_row.clear();
+                table_row_cells.clear();
                 bold = true;
             }
             Event::End(TagEnd::TableHead) => {
                 table_header_cells = std::mem::take(&mut table_current_row);
+                table_rows.push(std::mem::take(&mut table_row_cells));
                 bold = false;
             }
             Event::Start(Tag::TableRow) => {
                 table_current_row.clear();
+                table_row_cells.clear();
             }
             Event::End(TagEnd::TableRow) => {
                 table_data_rows.push(std::mem::take(&mut table_current_row));
+                table_rows.push(std::mem::take(&mut table_row_cells));
             }
-            Event::Start(Tag::TableCell) => {}
+            Event::Start(Tag::TableCell) => in_table_cell = true,
             Event::End(TagEnd::TableCell) => {
-                table_current_row.push(std::mem::take(&mut current_spans));
+                let spans = std::mem::take(&mut current_spans);
+                if !spans.is_empty() {
+                    table_cell_content.push(ContentBlock::Text(Line::from(spans.clone())));
+                }
+                table_current_row.push(spans);
+                table_row_cells.push(crate::TableCell {
+                    colspan: 1,
+                    content: std::mem::take(&mut table_cell_content),
+                });
+                in_table_cell = false;
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 add_block_separator_cb(&mut blocks, base);
@@ -3041,6 +3081,33 @@ mod tests {
                 ContentBlock::Table(table) => format!("{table:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn markdown_table_images_stay_in_their_cells() {
+        let md = "| 修正前 | 修正後 |\n| --- | --- |\n| ![修正前](https://example.com/before.png) | ![修正後](https://example.com/after.png) |";
+        let blocks = Renderer::default().render_blocks(md, &RenderOptions::default());
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. })),
+            "{blocks:?}"
+        );
+        let table = blocks
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table block");
+        assert!(matches!(
+            table.rows[1][0].content.as_slice(),
+            [ContentBlock::Image { url, .. }] if url == "https://example.com/before.png"
+        ));
+        assert!(matches!(
+            table.rows[1][1].content.as_slice(),
+            [ContentBlock::Image { url, .. }] if url == "https://example.com/after.png"
+        ));
     }
 
     #[test]
